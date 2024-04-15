@@ -6,8 +6,8 @@ scenes = ["room0", "room1", "room2",
           "office_", "office4"]
 
 primary_device="cuda:0"
-seed = 0
-scene_name = scenes[0]
+seed = int(os.environ["SEED"])
+scene_name = scenes[int(os.environ["SCENE_NUM"])]
 
 map_every = 1
 keyframe_every = 5
@@ -38,9 +38,9 @@ config = dict(
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=True,
     wandb=dict(
-        #entity="theairlab",
+        entity="theairlab",
         project="SplaTAM",
-        #group=group_name,
+        group=group_name,
         name=run_name,
         save_qual=False,
         eval_save_qual=True,

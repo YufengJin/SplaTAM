@@ -3,7 +3,6 @@ import os
 import shutil
 import sys
 import time
-import datetime
 from importlib.machinery import SourceFileLoader
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +23,7 @@ import wandb
 
 from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
                                         ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
-                                        ScannetPPDataset, NeRFCaptureDataset, HO3D_v3Dataset)
+                                        ScannetPPDataset, NeRFCaptureDataset)
 from utils.common_utils import seed_everything, save_params_ckpt, save_params
 from utils.eval_helpers import report_loss, report_progress, eval
 from utils.keyframe_selection import keyframe_selection_overlap
@@ -41,8 +40,6 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["icl"]:
         return ICLDataset(config_dict, basedir, sequence, **kwargs)
-    elif config_dict["dataset_name"].lower() in ["ho3d_v3"]:
-        return HO3D_v3Dataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["replica"]:
         return ReplicaDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["replicav2"]:
@@ -172,18 +169,11 @@ def initialize_optimizer(params, lrs_dict, tracking):
 def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
                               mean_sq_dist_method, densify_dataset=None, gaussian_distribution=None):
     # Get RGB-D Data & Camera Parameters
-    mask = None
-    data = dataset[0]
-    if len(data) == 5:
-        color, depth, mask, intrinsics, pose = data
-    else:
-        color, depth, intrinsics, pose = data
+    color, depth, intrinsics, pose = dataset[0]
 
     # Process RGB-D Data
     color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
     depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
-    if mask is not None:
-        mask = mask.permute(2, 0, 1)
     
     # Process Camera Parameters
     intrinsics = intrinsics[:3, :3]
@@ -203,16 +193,8 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
         densify_intrinsics = intrinsics
 
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
-    #mask_tmp = (depth > 0) # Mask out invalid depth values
-    mask_tmp = (depth > 0) & (depth < 2.) # Mask out invalid depth values
-    mask_tmp = mask_tmp.reshape(-1)
-
-    if mask is not None:
-        mask = mask.bool().reshape(-1)
-        mask = mask & mask_tmp
-    else:
-        mask = mask_tmp
-
+    mask = (depth > 0) # Mask out invalid depth values
+    mask = mask.reshape(-1)
     init_pt_cld, mean3_sq_dist = get_pointcloud(color, depth, densify_intrinsics, w2c, 
                                                 mask=mask, compute_mean_sq_dist=True, 
                                                 mean_sq_dist_method=mean_sq_dist_method)
@@ -278,20 +260,16 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     # Mask with valid depth values (accounts for outlier depth values)
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
-    """
-    #if ignore_outlier_depth_loss:
-    #    depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-    #    mask = (depth_error < 10*depth_error.median())
-    #    mask = mask & (curr_data['depth'] > 0)
-    #else:
-    #    mask = (curr_data['depth'] > 0)
-    """
-    mask = curr_data['mask'].bool()
+    if ignore_outlier_depth_loss:
+        depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
+        mask = (depth_error < 10*depth_error.median())
+        mask = mask & (curr_data['depth'] > 0)
+    else:
+        mask = (curr_data['depth'] > 0)
     mask = mask & nan_mask
-    mask = mask & presence_sil_mask.unsqueeze(0)
     # Mask with presence silhouette mask (accounts for empty space)
-    #if tracking and use_sil_for_loss:
-    #    mask = mask & presence_sil_mask
+    if tracking and use_sil_for_loss:
+        mask = mask & presence_sil_mask
 
     # Depth loss
     if use_l1:
@@ -300,8 +278,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
         else:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
-
-    """
+    
     # RGB Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
         color_mask = torch.tile(mask, (3, 1, 1))
@@ -311,15 +288,9 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
-    """
-
-    color_mask = torch.tile(mask, (3, 1, 1))
-    color_mask = color_mask.detach()
-    losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
 
     # Visualize the Diff Images
-    #if tracking and visualize_tracking_loss:
-    if True:
+    if tracking and visualize_tracking_loss:
         fig, ax = plt.subplots(2, 4, figsize=(12, 6))
         weighted_render_im = im * color_mask
         weighted_im = curr_data['im'] * color_mask
@@ -353,15 +324,12 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         fig.suptitle(f"Tracking Iteration: {tracking_iteration}", fontsize=16)
         # Figure Tight Layout
         fig.tight_layout()
-        plot_dir = '/home/yjin/repos/SplaTAM/debug'
         os.makedirs(plot_dir, exist_ok=True)
-        current_time = datetime.datetime.now()
-        filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-        plt.savefig(os.path.join(plot_dir, f"{filename}.png"), bbox_inches='tight')
+        plt.savefig(os.path.join(plot_dir, f"tmp.png"), bbox_inches='tight')
         plt.close()
-        #plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
-        #cv2.imshow('Diff Images', plot_img)
-        #cv2.waitKey(0)
+        plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
+        cv2.imshow('Diff Images', plot_img)
+        cv2.waitKey(1)
         ## Save Tracking Loss Viz
         # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
         # os.makedirs(save_plot_dir, exist_ok=True)
@@ -417,28 +385,15 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     silhouette = depth_sil[1, :, :]
     non_presence_sil_mask = (silhouette < sil_thres)
     # Check for new foreground objects by using GT depth
-    gt_mask = curr_data['mask'][0, :, :]
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
-    mask = gt_mask & (gt_depth > 0)
-    depth_error = torch.abs(gt_depth - render_depth) * mask
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error < depth_error.median())
+    depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
+    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
     # Determine non-presence mask
     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
-    #TODO add new gaussian
-    if True:
-        plt.subplot(2, 4, 1); plt.imshow(silhouette.detach().cpu().numpy()); plt.title("silhouette")
-        plt.subplot(2, 4, 2); plt.imshow(curr_data['mask'].squeeze().cpu().numpy()); plt.title("gt_mask")
-        plt.subplot(2, 4, 3); plt.imshow(gt_depth.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
-        plt.subplot(2, 4, 4); plt.imshow(render_depth.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
-        plt.subplot(2, 4, 5); plt.imshow(depth_error.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
-        plt.subplot(2, 4, 6); plt.imshow(.squeeze().cpu().numpy()); plt.title("gt_mask")
-        plt.subplot(2, 4, 7); plt.imshow(curr_data['mask'].squeeze().cpu().numpy()); plt.title("gt_mask")
 
-    
-    breakpoint()
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
         # Get the new pointcloud in the world frame
@@ -678,8 +633,7 @@ def rgbd_slam(config: dict):
                 # Initialize Keyframe Info
                 color = color.permute(2, 0, 1) / 255
                 depth = depth.permute(2, 0, 1)
-                mask  = mask.permute(2, 0, 1)
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth, 'mask': mask}
+                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
     else:
@@ -688,24 +642,18 @@ def rgbd_slam(config: dict):
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         # Load RGBD frames incrementally instead of all frames
-        data = dataset[time_idx]
-        mask = None
-        if len(data) == 5:
-            color, depth, mask, _, gt_pose = data
-        else:
-            color, depth, _, gt_pose = data
+        color, depth, _, gt_pose = dataset[time_idx]
         # Process poses
         gt_w2c = torch.linalg.inv(gt_pose)
         # Process RGB-D Data
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
-        mask = mask.permute(2, 0, 1)
         gt_w2c_all_frames.append(gt_w2c)
         curr_gt_w2c = gt_w2c_all_frames
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'mask': mask, 'id': iter_time_idx, 'intrinsics': intrinsics, 
+        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
         
         # Initialize Data for Tracking
@@ -841,7 +789,6 @@ def rgbd_slam(config: dict):
                     densify_curr_data = curr_data
 
                 # Add new Gaussians to the scene based on the Silhouette
-                # TODO add masked gaussian
                 params, variables = add_new_gaussians(params, variables, densify_curr_data, 
                                                       config['mapping']['sil_thres'], time_idx,
                                                       config['mean_sq_dist_method'], config['gaussian_distribution'])
@@ -888,14 +835,13 @@ def rgbd_slam(config: dict):
                     iter_time_idx = time_idx
                     iter_color = color
                     iter_depth = depth
-                    iter_mask  = mask
                 else:
                     # Use Keyframe Data
                     iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
                     iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
                     iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
                 iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'mask': mask, 'id': iter_time_idx, 
+                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
@@ -973,7 +919,7 @@ def rgbd_slam(config: dict):
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth, 'mask': mask}
+                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
                 keyframe_time_indices.append(time_idx)

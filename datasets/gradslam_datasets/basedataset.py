@@ -24,6 +24,11 @@ from natsort import natsorted
 from .geometryutils import relative_transformation
 from . import datautils
 
+def convert_ho3d_rgb2depth(depth_img):
+    depth_scale = 0.00012498664727900177
+    dpt = depth_img[:, :, 2] + depth_img[:, :, 1] * 256
+    dpt = dpt * depth_scale
+    return dpt.astype(np.float32)
 
 def to_scalar(inp: Union[np.ndarray, torch.Tensor, float]) -> Union[int, float]:
     """
@@ -167,12 +172,21 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         if "crop_edge" in config_dict["camera_params"].keys():
             self.crop_edge = config_dict["camera_params"]["crop_edge"]
 
-        self.color_paths, self.depth_paths, self.embedding_paths = self.get_filepaths()
+        paths = self.get_filepaths()
+        if len(paths) == 3:
+            self.color_paths, self.depth_paths, self.embedding_paths = paths
+        elif len(paths) == 4:
+            self.color_paths, self.depth_paths, self.embedding_paths, self.mask_paths = paths
+
         if len(self.color_paths) != len(self.depth_paths):
             raise ValueError("Number of color and depth images must be the same.")
         if self.load_embeddings:
             if len(self.color_paths) != len(self.embedding_paths):
                 raise ValueError("Mismatch between number of color images and number of embedding files.")
+        if hasattr(self, 'mask_paths'):
+            if len(self.color_paths) != len(self.mask_paths):
+                raise ValueError("Number of color and mask images must be the same.")
+        
         self.num_imgs = len(self.color_paths)
         self.poses = self.load_poses()
 
@@ -206,6 +220,22 @@ class GradSLAMDataset(torch.utils.data.Dataset):
     def load_poses(self):
         """Load camera poses. Implement in subclass."""
         raise NotImplementedError
+
+    def _preprocess_mask(self, mask:np.ndarray):
+        mask = cv2.resize(
+            mask,
+            (self.desired_width, self.desired_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        mask = mask.astype(bool)
+        mask = mask.astype(float)
+
+        mask = np.expand_dims(mask, -1)
+        if self.channels_first:
+            mask = datautils.channels_first(mask)
+        return mask 
+
 
     def _preprocess_color(self, color: np.ndarray):
         r"""Preprocesses the color image by resizing to :math:`(H, W, C)`, (optionally) normalizing values to
@@ -301,6 +331,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         if ".png" in depth_path:
             # depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
             depth = np.asarray(imageio.imread(depth_path), dtype=np.int64)
+            
         elif ".exr" in depth_path:
             depth = readEXR_onlydepth(depth_path)
 
@@ -311,6 +342,9 @@ class GradSLAMDataset(torch.utils.data.Dataset):
 
         color = torch.from_numpy(color)
         K = torch.from_numpy(K)
+
+        if self.name == 'ho3d_v3' and depth.shape[-1] == 3:
+            depth = convert_ho3d_rgb2depth(depth)
 
         depth = self._preprocess_depth(depth)
         depth = torch.from_numpy(depth)
@@ -329,6 +363,21 @@ class GradSLAMDataset(torch.utils.data.Dataset):
                 intrinsics.to(self.device).type(self.dtype),
                 pose.to(self.device).type(self.dtype),
                 embedding.to(self.device),  # Allow embedding to be another dtype
+                # self.retained_inds[index].item(),
+            )
+
+        if hasattr(self,'mask_paths'):
+            mask_path = self.mask_paths[index]
+            mask = np.asarray(imageio.imread(mask_path), dtype=float)
+            mask = self._preprocess_mask(mask)
+            mask = torch.from_numpy(mask)
+
+            return (
+                color.to(self.device).type(self.dtype),
+                depth.to(self.device).type(self.dtype),
+                mask.to(self.device).type(self.dtype),
+                intrinsics.to(self.device).type(self.dtype),
+                pose.to(self.device).type(self.dtype),
                 # self.retained_inds[index].item(),
             )
 

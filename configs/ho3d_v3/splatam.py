@@ -1,9 +1,8 @@
 import os
 from os.path import join as p_join
 
-scenes = ["room0", "room1", "room2",
-          "office0", "office1", "office2",
-          "office_", "office4"]
+scenes = ["AP10", "AP12", "AP14", "MPM11", "MPM13", "SB11", "SM1",
+          "AP11", "AP13", "MPM10", "MPM12", "MPM14", "SB13"]
 
 primary_device="cuda:0"
 seed = 0
@@ -15,7 +14,7 @@ mapping_window_size = 24
 tracking_iters = 40
 mapping_iters = 60
 
-group_name = "Replica"
+group_name = "ho3d_v3"
 run_name = f"{scene_name}_{seed}"
 
 config = dict(
@@ -46,11 +45,11 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="./data/Replica",
-        gradslam_data_cfg="./configs/data/replica.yaml",
+        basedir="/home/datasets/HO3D_v3",
+        gradslam_data_cfg="./configs/data/ho3d_v3.yaml",  #None
         sequence=scene_name,
-        desired_image_height=680,
-        desired_image_width=1200,
+        desired_image_height=480,
+        desired_image_width=640,
         start=0,
         end=-1,
         stride=1,
