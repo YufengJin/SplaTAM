@@ -6,7 +6,7 @@ scenes = ["AP10", "AP12", "AP14", "MPM11", "MPM13", "SB11", "SM1",
 
 primary_device="cuda:0"
 seed = 0
-scene_name = scenes[0]
+scene_name = scenes[3]
 
 map_every = 1
 keyframe_every = 5
@@ -35,7 +35,7 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    use_wandb=True,
+    use_wandb=False,
     wandb=dict(
         #entity="theairlab",
         project="SplaTAM",
@@ -56,7 +56,7 @@ config = dict(
         num_frames=-1,
     ),
     tracking=dict(
-        use_gt_poses=False, # Use GT Poses for Tracking
+        use_gt_poses=True, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,

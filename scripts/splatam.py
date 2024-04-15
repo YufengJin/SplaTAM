@@ -320,7 +320,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     # Visualize the Diff Images
     #if tracking and visualize_tracking_loss:
     if True:
-        fig, ax = plt.subplots(2, 4, figsize=(12, 6))
+        fig, ax = plt.subplots(3, 4, figsize=(12, 6))
         weighted_render_im = im * color_mask
         weighted_im = curr_data['im'] * color_mask
         weighted_render_depth = depth * mask
@@ -345,6 +345,14 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         ax[0, 3].set_title("Silhouette Mask")
         ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
         ax[1, 3].set_title("Loss Mask")
+        ax[2, 0].imshow(curr_data['mask'].detach().squeeze().cpu())
+        ax[2, 0].set_title("gt Mask")
+        ax[2, 1].imshow(mask.detach().squeeze().cpu())
+        ax[2, 1].set_title("postprocessed mask")
+        ax[2, 2].imshow((im.permute(1,2,0).detach().squeeze().cpu().numpy()*255).astype(np.uint8))
+        ax[2, 2].set_title("Rendered RGB")
+        ax[2, 3].imshow(curr_data['im'].permute(1,2,0).detach().squeeze().cpu())
+        ax[2, 3].set_title("GT RGB")
         # Turn off axis
         for i in range(2):
             for j in range(4):
@@ -420,25 +428,31 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     gt_mask = curr_data['mask'][0, :, :]
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
-    mask = gt_mask & (gt_depth > 0)
+    mask = gt_mask.bool() & (gt_depth > 0) 
+
+    gt_depth = gt_depth * mask
+    # filter out outlier 
+    
     depth_error = torch.abs(gt_depth - render_depth) * mask
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error < depth_error.median())
+    non_presence_depth_mask = (render_depth < gt_depth) * (gt_depth < 2*gt_depth.median())   #TODO 2 should be a hp
     # Determine non-presence mask
-    non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
+    non_presence_mask = non_presence_depth_mask.bool()
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
     #TODO add new gaussian
-    if True:
+    if False:
         plt.subplot(2, 4, 1); plt.imshow(silhouette.detach().cpu().numpy()); plt.title("silhouette")
         plt.subplot(2, 4, 2); plt.imshow(curr_data['mask'].squeeze().cpu().numpy()); plt.title("gt_mask")
-        plt.subplot(2, 4, 3); plt.imshow(gt_depth.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
-        plt.subplot(2, 4, 4); plt.imshow(render_depth.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
-        plt.subplot(2, 4, 5); plt.imshow(depth_error.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
-        plt.subplot(2, 4, 6); plt.imshow(.squeeze().cpu().numpy()); plt.title("gt_mask")
-        plt.subplot(2, 4, 7); plt.imshow(curr_data['mask'].squeeze().cpu().numpy()); plt.title("gt_mask")
+        plt.subplot(2, 4, 3); plt.imshow(gt_depth.detach().cpu().numpy()); plt.colorbar();plt.title("gt depth")
+        plt.subplot(2, 4, 4); plt.imshow(render_depth.detach().cpu().numpy()); plt.colorbar();plt.title("rendered depth")
+        plt.subplot(2, 4, 5); plt.imshow(gt_depth.detach().cpu().numpy()-render_depth.detach().cpu().numpy()); plt.colorbar();plt.title("depth_loss")
+        plt.subplot(2, 4, 6); plt.imshow(depth_error.detach().cpu().numpy()); plt.colorbar();plt.title("masked depth loss")
+        plt.subplot(2, 4, 7); plt.imshow(non_presence_depth_mask.detach().cpu().numpy()); plt.colorbar();plt.title("non_presence_depth_mask")
+        plt.subplot(2, 4, 8); plt.imshow(non_presence_sil_mask.detach().cpu().numpy()); plt.colorbar();plt.title("non_presence_sil_mask")
 
+
+        plt.show()
     
-    breakpoint()
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
         # Get the new pointcloud in the world frame
@@ -687,6 +701,8 @@ def rgbd_slam(config: dict):
     
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
+        if time_idx % 20 != 0:
+            continue
         # Load RGBD frames incrementally instead of all frames
         data = dataset[time_idx]
         mask = None
@@ -795,6 +811,7 @@ def rgbd_slam(config: dict):
                 params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
                 params['cam_trans'][..., time_idx] = candidate_cam_tran
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
+            breakpoint()
             with torch.no_grad():
                 # Get the ground truth pose relative to frame 0
                 rel_w2c = curr_gt_w2c[-1]
