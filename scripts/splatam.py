@@ -1,5 +1,6 @@
 import argparse
 import os
+import io
 import shutil
 import sys
 import time
@@ -21,6 +22,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
+import open3d as o3d
 
 from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
                                         ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
@@ -69,11 +71,27 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
 
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
+    def remove_far_pixels(depth, threshold_factor=2.):
+        # Calculate mean and standard deviation of depth values
+        mean_depth = np.mean(depth[depth>1e-5])
+        std_depth = np.std(depth[depth>1e-5])
+
+        # Set a threshold based on mean and standard deviation
+        threshold = mean_depth + threshold_factor * std_depth
+
+        # Threshold depth image
+        depth_mask = depth < threshold
+        filtered_depth = depth.copy()
+        filtered_depth[depth_mask] = 0  # Set far pixels to 0
+
+        return depth_mask, filtered_depth
+
     width, height = color.shape[2], color.shape[1]
     CX = intrinsics[0][2]
     CY = intrinsics[1][2]
     FX = intrinsics[0][0]
     FY = intrinsics[1][1]
+
 
     # Compute indices of pixels
     x_grid, y_grid = torch.meshgrid(torch.arange(width).cuda().float(), 
@@ -108,8 +126,15 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
     point_cld = torch.cat((pts, cols), -1)
 
+    # remove outlier
+    
     # Select points based on mask
     if mask is not None:
+        # remove depth outlier
+        masked_depth = depth[0] * mask.reshape(height, width)
+        depth_mask, _ = remove_far_pixels(masked_depth.cpu().numpy())
+
+        mask = mask & torch.tensor(depth_mask.reshape(-1)).cuda()
         point_cld = point_cld[mask]
         if compute_mean_sq_dist:
             mean3_sq_dist = mean3_sq_dist[mask]
@@ -231,8 +256,22 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
-    # Initialize Loss Dictionary
+             mapping=False, do_ba=False, plot_dir=None, visualize_loss=False, tracking_iteration=None):
+    def erosion(bool_image, kernel_size=3):
+        # Convert boolean image to a tensor with dtype torch.float32
+        bool_image_tensor = bool_image.float()
+
+        # Define a kernel for erosion
+        kernel = torch.ones(kernel_size, kernel_size).to(bool_image.device)
+
+        # Apply erosion using convolution
+        eroded_image = F.conv2d(bool_image_tensor.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0), padding=kernel_size//2)
+
+        # Threshold to convert back to boolean image
+        eroded_image = (eroded_image >= kernel_size**2).squeeze(0).squeeze(0)
+
+        return eroded_image
+        # Initialize Loss Dictionary
     losses = {}
 
     if tracking:
@@ -287,11 +326,15 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     #    mask = (curr_data['depth'] > 0)
     """
     mask = curr_data['mask'].bool()
-    mask = mask & nan_mask
+    gt_im = curr_data['im'] * mask
+    
+    eroded_mask = erosion(mask.squeeze())
+    mask = eroded_mask.unsqueeze(0) & nan_mask
     mask = mask & presence_sil_mask.unsqueeze(0)
     # Mask with presence silhouette mask (accounts for empty space)
     #if tracking and use_sil_for_loss:
     #    mask = mask & presence_sil_mask
+    
 
     # Depth loss
     if use_l1:
@@ -315,11 +358,24 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     color_mask = torch.tile(mask, (3, 1, 1))
     color_mask = color_mask.detach()
-    losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
+    rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
+    losses['im'] = 0.8 * rgbl1 + 0.2 * (1.0 - calc_ssim(im, gt_im))
 
     # Visualize the Diff Images
-    #if tracking and visualize_tracking_loss:
-    if True:
+    if visualize_loss:
+    #if np.random.rand() < 0.1:
+        # define a function which returns an image as numpy array from figure
+        def get_img_from_fig(fig, dpi=180):
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi)
+            buf.seek(0)
+            img_arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)
+            buf.close()
+            img = cv2.imdecode(img_arr, 1)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+            return img
+
         fig, ax = plt.subplots(3, 4, figsize=(12, 6))
         weighted_render_im = im * color_mask
         weighted_im = curr_data['im'] * color_mask
@@ -341,32 +397,40 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
         ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
         ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
-        ax[0, 3].imshow(presence_sil_mask.detach().cpu(), cmap="gray")
+        ax_im = ax[0, 3].imshow(silhouette.detach().squeeze().cpu())
+        cbar = fig.colorbar(ax_im, ax=ax[0,3])
         ax[0, 3].set_title("Silhouette Mask")
         ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
         ax[1, 3].set_title("Loss Mask")
         ax[2, 0].imshow(curr_data['mask'].detach().squeeze().cpu())
         ax[2, 0].set_title("gt Mask")
-        ax[2, 1].imshow(mask.detach().squeeze().cpu())
-        ax[2, 1].set_title("postprocessed mask")
+        ax_im = ax[2, 1].imshow(depth_sq.detach().squeeze().cpu())
+        # Add colorbar
+        cbar = fig.colorbar(ax_im, ax=ax[2,1])
+        ax[2, 1].set_title("uncertainty mask")
         ax[2, 2].imshow((im.permute(1,2,0).detach().squeeze().cpu().numpy()*255).astype(np.uint8))
         ax[2, 2].set_title("Rendered RGB")
-        ax[2, 3].imshow(curr_data['im'].permute(1,2,0).detach().squeeze().cpu())
+        ax[2, 3].imshow(gt_im.permute(1,2,0).detach().squeeze().cpu())
         ax[2, 3].set_title("GT RGB")
         # Turn off axis
         for i in range(2):
             for j in range(4):
                 ax[i, j].axis('off')
         # Set Title
-        fig.suptitle(f"Tracking Iteration: {tracking_iteration}", fontsize=16)
+        if tracking_iteration:
+            suptitle = f"frame_id: {curr_data['id']}, Tracking Iteration: {tracking_iteration}"
+        else:
+            suptitle = f"frame_id: {curr_data['id']}, Mapping"
+        fig.suptitle(suptitle, fontsize=16)
         # Figure Tight Layout
         fig.tight_layout()
         plot_dir = '/home/yjin/repos/SplaTAM/debug'
         os.makedirs(plot_dir, exist_ok=True)
         current_time = datetime.datetime.now()
         filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-        plt.savefig(os.path.join(plot_dir, f"{filename}.png"), bbox_inches='tight')
+        plt.savefig(os.path.join(plot_dir, f"{filename}.png"), bbox_inches='tight', dpi=180)
         plt.close()
+
         #plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
         #cv2.imshow('Diff Images', plot_img)
         #cv2.waitKey(0)
@@ -417,8 +481,11 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
 
 def add_new_gaussians(params, variables, curr_data, sil_thres, 
                       time_idx, mean_sq_dist_method, gaussian_distribution):
+
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
+
+    
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_gaussians)
     depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
@@ -434,9 +501,9 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     # filter out outlier 
     
     depth_error = torch.abs(gt_depth - render_depth) * mask
-    non_presence_depth_mask = (render_depth < gt_depth) * (gt_depth < 2*gt_depth.median())   #TODO 2 should be a hp
+    non_presence_depth_mask = (render_depth < gt_depth) 
     # Determine non-presence mask
-    non_presence_mask = non_presence_depth_mask.bool()
+    non_presence_mask = non_presence_depth_mask.bool() & mask
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
     #TODO add new gaussian
@@ -452,6 +519,18 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
 
 
         plt.show()
+
+    coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+
+    points = params['means3D'].detach().cpu().numpy().copy()
+    colors = params['rgb_colors'].detach().cpu().numpy().copy()
+    # Create a point cloud object
+    pcl_prev = o3d.geometry.PointCloud()
+
+    # Set the point cloud data
+    pcl_prev.points = o3d.utility.Vector3dVector(points)
+    pcl_prev.colors = o3d.utility.Vector3dVector(colors)
+
     
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
@@ -475,6 +554,23 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
         variables['max_2D_radius'] = torch.zeros(num_pts, device="cuda").float()
         new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device="cuda").float()
         variables['timestep'] = torch.cat((variables['timestep'],new_timestep),dim=0)
+
+    try:
+        points = new_params['means3D'].detach().cpu().numpy().copy()
+        colors = new_params['rgb_colors'].detach().cpu().numpy().copy()
+        # Create a point cloud object
+        pcl = o3d.geometry.PointCloud()
+
+        # Set the point cloud data
+        pcl.points = o3d.utility.Vector3dVector(points)
+        pcl.colors = o3d.utility.Vector3dVector(colors)
+
+        # Visualize the point cloud
+        #o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
+    except:
+        print('Visualization of points fails')
+
+
 
     return params, variables
 
@@ -701,8 +797,8 @@ def rgbd_slam(config: dict):
     
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
-        if time_idx % 20 != 0:
-            continue
+        #if time_idx % 5 != 0:
+        #    continue
         # Load RGBD frames incrementally instead of all frames
         data = dataset[time_idx]
         mask = None
@@ -758,10 +854,16 @@ def rgbd_slam(config: dict):
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
+                if time_idx % 100 == 0:
+                    visualize_loss = True
+                else:
+                    visualize_loss = False
+                
+
                 loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
-                                                   plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
+                                                   plot_dir=eval_dir, visualize_loss=visualize_loss,
                                                    tracking_iteration=iter)
                 if config['use_wandb']:
                     # Report Loss
@@ -811,7 +913,6 @@ def rgbd_slam(config: dict):
                 params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
                 params['cam_trans'][..., time_idx] = candidate_cam_tran
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
-            breakpoint()
             with torch.no_grad():
                 # Get the ground truth pose relative to frame 0
                 rel_w2c = curr_gt_w2c[-1]
@@ -911,13 +1012,17 @@ def rgbd_slam(config: dict):
                     iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
                     iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
                     iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
+                    iter_mask = keyframe_list[selected_rand_keyframe_idx]['mask']
                 iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'mask': mask, 'id': iter_time_idx, 
+                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'mask': iter_mask, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                if iter % 10 == 0 and time_idx % 50 == 0:
+                    visualize_loss = True
+                else:
+                    visualize_loss = False
+
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True, visualize_loss=visualize_loss)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
@@ -1030,16 +1135,16 @@ def rgbd_slam(config: dict):
                        "Final Stats/step": 1})
     
     # Evaluate Final Parameters
-    with torch.no_grad():
-        if config['use_wandb']:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
-        else:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
+    #with torch.no_grad():
+    #    if config['use_wandb']:
+    #        eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+    #             wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
+    #             mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+    #             eval_every=config['eval_every'])
+    #    else:
+    #        eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+    #             mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+    #             eval_every=config['eval_every'])
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']

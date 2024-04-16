@@ -73,8 +73,9 @@ class HO3D_v3Dataset(GradSLAMDataset):
             for rowId in range(4):
                 c2w += list(map(float, lines[4*i+rowId].split()))
             c2w = np.array(c2w).reshape(4,4)
-            # c2w[:3, 1] *= -1
-            # c2w[:3, 2] *= -1
+            c2w = np.linalg.inv(c2w)
+            #c2w[:3, 1] *= -1
+            #c2w[:3, 2] *= -1
             c2w = torch.from_numpy(c2w).float()
             poses.append(c2w)
         return poses

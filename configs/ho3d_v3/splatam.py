@@ -56,7 +56,7 @@ config = dict(
         num_frames=-1,
     ),
     tracking=dict(
-        use_gt_poses=True, # Use GT Poses for Tracking
+        use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,

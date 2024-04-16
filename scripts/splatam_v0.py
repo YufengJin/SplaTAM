@@ -3,6 +3,8 @@ import os
 import shutil
 import sys
 import time
+import datetime
+import open3d as o3d
 from importlib.machinery import SourceFileLoader
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -290,10 +292,11 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
 
     # Visualize the Diff Images
-    if tracking and visualize_tracking_loss:
+    if False:
+    #if tracking and visualize_tracking_loss:
         fig, ax = plt.subplots(2, 4, figsize=(12, 6))
-        weighted_render_im = im * color_mask
-        weighted_im = curr_data['im'] * color_mask
+        weighted_render_im = im #* color_mask
+        weighted_im = curr_data['im'] #* color_mask
         weighted_render_depth = depth * mask
         weighted_depth = curr_data['depth'] * mask
         diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
@@ -324,12 +327,15 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         fig.suptitle(f"Tracking Iteration: {tracking_iteration}", fontsize=16)
         # Figure Tight Layout
         fig.tight_layout()
+        plot_dir = '/home/yjin/repos/SplaTAM/debug'
         os.makedirs(plot_dir, exist_ok=True)
-        plt.savefig(os.path.join(plot_dir, f"tmp.png"), bbox_inches='tight')
+        current_time = datetime.datetime.now()
+        filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
+        plt.savefig(os.path.join(plot_dir, f"{filename}.png"), bbox_inches='tight')
         plt.close()
-        plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
-        cv2.imshow('Diff Images', plot_img)
-        cv2.waitKey(1)
+        #plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
+        #cv2.imshow('Diff Images', plot_img)
+        #cv2.waitKey(1)
         ## Save Tracking Loss Viz
         # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
         # os.makedirs(save_plot_dir, exist_ok=True)
@@ -394,6 +400,19 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
 
+    # visualize old point
+    coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+
+    points = params['means3D'].detach().cpu().numpy().copy()
+    colors = params['rgb_colors'].detach().cpu().numpy().copy()
+    # Create a point cloud object
+    pcl_prev = o3d.geometry.PointCloud()
+    
+    # Set the point cloud data
+    pcl_prev.points = o3d.utility.Vector3dVector(points)
+    pcl_prev.colors = o3d.utility.Vector3dVector(colors)
+    
+
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
         # Get the new pointcloud in the world frame
@@ -409,6 +428,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
                                     mean_sq_dist_method=mean_sq_dist_method)
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
         for k, v in new_params.items():
+            # add new point
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         num_pts = params['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
@@ -416,6 +436,21 @@ def add_new_gaussians(params, variables, curr_data, sil_thres,
         variables['max_2D_radius'] = torch.zeros(num_pts, device="cuda").float()
         new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device="cuda").float()
         variables['timestep'] = torch.cat((variables['timestep'],new_timestep),dim=0)
+
+    try:
+        points = new_params['means3D'].detach().cpu().numpy().copy()
+        colors = new_params['rgb_colors'].detach().cpu().numpy().copy()
+        # Create a point cloud object
+        pcl = o3d.geometry.PointCloud()
+
+        # Set the point cloud data
+        pcl.points = o3d.utility.Vector3dVector(points)
+        pcl.colors = o3d.utility.Vector3dVector(colors)
+
+        # Visualize the point cloud
+        o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
+    except:
+        print('Visualization of points fails')
 
     return params, variables
 
