@@ -172,6 +172,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         if "crop_edge" in config_dict["camera_params"].keys():
             self.crop_edge = config_dict["camera_params"]["crop_edge"]
 
+        self.poses = self.load_poses()
         paths = self.get_filepaths()
         if len(paths) == 3:
             self.color_paths, self.depth_paths, self.embedding_paths = paths
@@ -188,7 +189,6 @@ class GradSLAMDataset(torch.utils.data.Dataset):
                 raise ValueError("Number of color and mask images must be the same.")
         
         self.num_imgs = len(self.color_paths)
-        self.poses = self.load_poses()
 
         if self.end == -1:
             self.end = self.num_imgs

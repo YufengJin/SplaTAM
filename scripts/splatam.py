@@ -26,7 +26,7 @@ import open3d as o3d
 
 from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
                                         ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
-                                        ScannetPPDataset, NeRFCaptureDataset, HO3D_v3Dataset)
+                                        ScannetPPDataset, NeRFCaptureDataset, HO3D_v3Dataset, BOPDataset)
 from utils.common_utils import seed_everything, save_params_ckpt, save_params
 from utils.eval_helpers import report_loss, report_progress, eval
 from utils.keyframe_selection import keyframe_selection_overlap
@@ -45,6 +45,8 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return ICLDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["ho3d_v3"]:
         return HO3D_v3Dataset(config_dict, basedir, sequence, **kwargs)
+    elif config_dict["dataset_name"].lower() in ["bop"]:
+        return BOPDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["replica"]:
         return ReplicaDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["replicav2"]:
@@ -671,6 +673,7 @@ def rgbd_slam(config: dict):
         else:
             seperate_tracking_res = False
     # Poses are relative to the first frame
+    
     dataset = get_dataset(
         config_dict=gradslam_data_cfg,
         basedir=dataset_config["basedir"],
@@ -684,6 +687,7 @@ def rgbd_slam(config: dict):
         relative_pose=True,
         ignore_bad=dataset_config["ignore_bad"],
         use_train_split=dataset_config["use_train_split"],
+        target_object_id = dataset_config.get("target_object_id", None),
     )
     num_frames = dataset_config["num_frames"]
     if num_frames == -1:
@@ -797,8 +801,8 @@ def rgbd_slam(config: dict):
     
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
-        #if time_idx % 5 != 0:
-        #    continue
+        if time_idx % 5 != 0:
+            continue
         # Load RGBD frames incrementally instead of all frames
         data = dataset[time_idx]
         mask = None
@@ -806,6 +810,7 @@ def rgbd_slam(config: dict):
             color, depth, mask, _, gt_pose = data
         else:
             color, depth, _, gt_pose = data
+
         # Process poses
         gt_w2c = torch.linalg.inv(gt_pose)
         # Process RGB-D Data
@@ -854,12 +859,11 @@ def rgbd_slam(config: dict):
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
-                if time_idx % 100 == 0:
+                if time_idx % 50 == 0:
                     visualize_loss = True
                 else:
                     visualize_loss = False
                 
-
                 loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 

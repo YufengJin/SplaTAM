@@ -12,3 +12,4 @@ from .tum import TUMDataset
 from .scannetpp import ScannetPPDataset
 from .nerfcapture import NeRFCaptureDataset
 from .ho3d import HO3D_v3Dataset
+from .bop import BOPDataset
