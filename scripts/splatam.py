@@ -19,11 +19,12 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
 import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
 import open3d as o3d
-
+import kornia as ki
 from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
                                         ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
                                         ScannetPPDataset, NeRFCaptureDataset, HO3D_v3Dataset, BOPDataset)
@@ -39,6 +40,62 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
+VIS_LOSS_IMAGE = False 
+
+def visualize_param_info(params):
+
+    # Get the color map by name:
+    cm = plt.get_cmap('gist_rainbow') # purple high, red small
+
+    points = params['means3D'].detach().cpu().numpy()
+    colors = params['rgb_colors'].detach().cpu().numpy()
+
+    opacities = params['logit_opacities'].detach().squeeze(1).cpu().numpy()
+    # exp
+    opacities = np.exp(opacities)
+    opa_colors = cm(opacities)
+
+    pcl = o3d.geometry.PointCloud()
+
+    # Set the point cloud data
+    pcl.points = o3d.utility.Vector3dVector(points)
+    pcl.colors = o3d.utility.Vector3dVector(colors)
+
+    pcl_opa = o3d.geometry.PointCloud()
+
+    # Set the point cloud data
+    pcl_opa.points = o3d.utility.Vector3dVector(points)
+    pcl_opa.colors = o3d.utility.Vector3dVector(opa_colors[..., :3])
+    
+    o3d.visualization.draw([pcl, pcl_opa])
+
+def add_rotation_error(se3_matrix, rotation_error):
+    # Decompose SE(3) matrix into rotation and translation
+    rotation_matrix = se3_matrix[:3, :3]
+    translation_vector = se3_matrix[:3, 3]
+
+    # Convert rotation error from axis-angle to rotation matrix
+    rotation_error_matrix = F.normalize(rotation_error, p=2, dim=-1)
+    rotation_error_matrix = rotation_error_matrix.view(-1, 3, 1)  # Reshape for batch processing
+    rotation_error_matrix = torch.eye(3).to(rotation_error_matrix.device) + torch.sin(rotation_error_matrix) + (1 - torch.cos(rotation_error_matrix))
+    rotation_error_matrix = rotation_error_matrix.view(-1, 3, 3)  # Reshape back
+
+    # Add rotation error
+    rotated_rotation_matrix = torch.matmul(rotation_matrix, rotation_error_matrix)
+
+    # Compose new SE(3) matrix
+    new_se3_matrix = torch.eye(4, device=se3_matrix.device)
+    new_se3_matrix[:3, :3] = rotated_rotation_matrix
+    new_se3_matrix[:3, 3] = translation_vector
+
+    return new_se3_matrix
+
+def add_translation_error(se3_matrix, translation_error):
+    # Add translation error
+    new_se3_matrix = se3_matrix.clone()
+    new_se3_matrix[:3, 3] += translation_error
+
+    return new_se3_matrix
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["icl"]:
@@ -258,7 +315,15 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_loss=False, tracking_iteration=None):
+             mapping=False, do_ba=False, plot_dir=None, visualize_loss=False, tracking_iteration=None, use_edge=True):
+    def imshow(input: torch.Tensor):
+        out = torchvision.utils.make_grid(input, nrow=2, padding=5)
+        out_np: np.ndarray = ki.utils.tensor_to_image(out)
+        plt.figure(figsize=(10,10))
+        plt.imshow(out_np)
+        plt.axis('off')
+        plt.show()
+
     def erosion(bool_image, kernel_size=3):
         # Convert boolean image to a tensor with dtype torch.float32
         bool_image_tensor = bool_image.float()
@@ -287,6 +352,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             transformed_gaussians = transform_to_frame(params, iter_time_idx,
                                                  gaussians_grad=True,
                                                  camera_grad=True)
+            print('Optimizting Camera and Gaussians')
         else:
             # Get current frame Gaussians, where only the Gaussians get gradient
             transformed_gaussians = transform_to_frame(params, iter_time_idx,
@@ -317,6 +383,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     uncertainty = depth_sq - depth**2
     uncertainty = uncertainty.detach()
 
+
     # Mask with valid depth values (accounts for outlier depth values)
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
     """
@@ -338,9 +405,36 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     #    mask = mask & presence_sil_mask
     
 
+    # canny edge detection
+    gt_gray = ki.color.rgb_to_grayscale(curr_data['im'].unsqueeze(0))
+    #imshow(gt_gray)
+
+    #sobel edges
+    gt_edge= ki.filters.sobel(gt_gray)
+    #imshow(1. - gt_sobel)
+    #canny edges
+    #gt_edge= ki.filters.canny(gt_gray)[0]
+    #imshow(1. - gt_canny.clamp(0., 1.))
+
+    gray = ki.color.rgb_to_grayscale(im.unsqueeze(0))
+
+    #sobel edges
+    edge= ki.filters.sobel(gray)
+    #imshow(1. - sobel)
+    #edge edges
+    #edge= ki.filters.canny(gray)[0]
+    #imshow(1. - edge.clamp(0., 1.))
+    
+    mask = mask.detach()
+    if True:
+        #losses['edge'] = torch.abs(gt_edge - edge)[mask.unsqueeze(0)].sum()
+        if tracking:
+            losses['edge'] = torch.abs(gt_edge - edge).sum()
+        else:
+            losses['edge'] = torch.abs(gt_edge - edge).mean()
+
     # Depth loss
     if use_l1:
-        mask = mask.detach()
         if tracking:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
         else:
@@ -361,10 +455,12 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     color_mask = torch.tile(mask, (3, 1, 1))
     color_mask = color_mask.detach()
     rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
+    #rgbl1 = torch.abs(gt_im - im).sum()
     losses['im'] = 0.8 * rgbl1 + 0.2 * (1.0 - calc_ssim(im, gt_im))
 
     # Visualize the Diff Images
-    if visualize_loss:
+    if VIS_LOSS_IMAGE:
+    #if False:
     #if np.random.rand() < 0.1:
         # define a function which returns an image as numpy array from figure
         def get_img_from_fig(fig, dpi=180):
@@ -378,26 +474,32 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         
             return img
 
-        fig, ax = plt.subplots(3, 4, figsize=(12, 6))
+        fig, ax = plt.subplots(4, 4, figsize=(12, 12))
         weighted_render_im = im * color_mask
         weighted_im = curr_data['im'] * color_mask
         weighted_render_depth = depth * mask
         weighted_depth = curr_data['depth'] * mask
+        #weighted_render_candy = (edge * mask).squeeze(0)
+        #weighted_candy = (gt_edge * mask).squeeze(0)
+        weighted_render_candy = (edge).squeeze(0)
+        weighted_candy = (gt_edge).squeeze(0)
         diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
         diff_depth = torch.abs(weighted_render_depth - weighted_depth).mean(dim=0).detach().cpu()
         viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+        diff_candy = torch.abs(weighted_render_candy - weighted_candy).mean(dim=0).detach().cpu()
         ax[0, 0].imshow(viz_img)
         ax[0, 0].set_title("Weighted GT RGB")
         viz_render_img = torch.clip(weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
         ax[1, 0].imshow(viz_render_img)
         ax[1, 0].set_title("Weighted Rendered RGB")
-        ax[0, 1].imshow(weighted_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
+        ax_im = ax[0, 1].imshow(weighted_depth[0].detach().cpu())
+        cbar = fig.colorbar(ax_im, ax=ax[0,1])
         ax[0, 1].set_title("Weighted GT Depth")
         ax[1, 1].imshow(weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
         ax[1, 1].set_title("Weighted Rendered Depth")
         ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
         ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
-        ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
+        ax_im = ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8); cbar = fig.colorbar(ax_im, ax=ax[1,2])
         ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
         ax_im = ax[0, 3].imshow(silhouette.detach().squeeze().cpu())
         cbar = fig.colorbar(ax_im, ax=ax[0,3])
@@ -414,6 +516,13 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         ax[2, 2].set_title("Rendered RGB")
         ax[2, 3].imshow(gt_im.permute(1,2,0).detach().squeeze().cpu())
         ax[2, 3].set_title("GT RGB")
+        ax[3, 0].imshow(torch.clamp(weighted_candy.permute(1,2,0).detach().squeeze().cpu(), 0., 1.) , cmap="jet")
+        ax[3, 0].set_title("Weighted GT canny")
+        # A3d colorbar
+        ax[3, 1].imshow(torch.clamp(weighted_render_candy.permute(1,2,0).detach().squeeze().cpu(), 0., 1.), cmap="jet")
+        ax[3, 1].set_title("Weighted rendered canny")
+        ax[3, 2].imshow(torch.clamp(diff_candy.detach().squeeze().cpu(), 0., 1.), cmap="jet")
+        ax[3, 2].set_title(f"Diff Edge: {torch.round(losses['edge'])}")
         # Turn off axis
         for i in range(2):
             for j in range(4):
@@ -842,48 +951,60 @@ def rgbd_slam(config: dict):
         if time_idx > 0:
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
 
-        # Tracking
+            # use small 6d err as init  pose
+            #with torch.no_grad():
+            #    # Get the ground truth pose relative to frame 0
+            #    rel_w2c = curr_gt_w2c[-1]
+            #    rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
+            #    rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
+            #    rel_w2c_tran = rel_w2c[:3, 3].detach()
+            #    # Update the camera parameters
+            #    params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
+            #    params['cam_trans'][..., time_idx] = rel_w2c_tran
+            
+        # tracking
         tracking_start_time = time.time()
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
-            # Reset Optimizer & Learning Rates for tracking
+            # reset optimizer & learning rates for tracking
             optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
-            # Keep Track of Best Candidate Rotation & Translation
+            # keep track of best candidate rotation & translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
             current_min_loss = float(1e20)
-            # Tracking Optimization
+            # tracking optimization
             iter = 0
             do_continue_slam = False
             num_iters_tracking = config['tracking']['num_iters']
-            progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            progress_bar = tqdm(range(num_iters_tracking), desc=f"tracking time step: {time_idx}")
             while True:
                 iter_start_time = time.time()
-                # Loss for current frame
+                # loss for current frame
                 if time_idx % 50 == 0:
                     visualize_loss = True
                 else:
                     visualize_loss = False
-                
+
+                visualize_loss = True
                 loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_loss=visualize_loss,
                                                    tracking_iteration=iter)
                 if config['use_wandb']:
-                    # Report Loss
+                    # report loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
-                # Backprop
+                # backprop
                 loss.backward()
-                # Optimizer Update
+                # optimizer update
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
-                    # Save the best candidate rotation & translation
+                    # save the best candidate rotation & translation
                     if loss < current_min_loss:
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
-                    # Report Progress
+                    # report progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
                             report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
@@ -892,22 +1013,22 @@ def rgbd_slam(config: dict):
                             report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
                     else:
                         progress_bar.update(1)
-                # Update the runtime numbers
+                # update the runtime numbers
                 iter_end_time = time.time()
                 tracking_iter_time_sum += iter_end_time - iter_start_time
                 tracking_iter_time_count += 1
-                # Check if we should stop tracking
+                # check if we should stop tracking
                 iter += 1
                 if iter == num_iters_tracking:
                     if losses['depth'] < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
                         break
                     elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
                         do_continue_slam = True
-                        progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+                        progress_bar = tqdm(range(num_iters_tracking), desc=f"tracking time step: {time_idx}")
                         num_iters_tracking = 2*num_iters_tracking
                         if config['use_wandb']:
-                            wandb_run.log({"Tracking/Extra Tracking Iters Frames": time_idx,
-                                        "Tracking/step": wandb_time_step})
+                            wandb_run.log({"tracking/extra tracking iters frames": time_idx,
+                                        "tracking/step": wandb_time_step})
                     else:
                         break
 
@@ -920,12 +1041,14 @@ def rgbd_slam(config: dict):
             with torch.no_grad():
                 # Get the ground truth pose relative to frame 0
                 rel_w2c = curr_gt_w2c[-1]
+
                 rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
                 rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
                 rel_w2c_tran = rel_w2c[:3, 3].detach()
                 # Update the camera parameters
                 params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
                 params['cam_trans'][..., time_idx] = rel_w2c_tran
+
         # Update the runtime numbers
         tracking_end_time = time.time()
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
@@ -1020,34 +1143,45 @@ def rgbd_slam(config: dict):
                 iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
                 iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'mask': iter_mask, 'id': iter_time_idx, 
                              'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-                if iter % 10 == 0 and time_idx % 50 == 0:
+                if iter % 10 == 0 and time_idx % 5 == 0:
                     visualize_loss = True
                 else:
                     visualize_loss = False
 
+                visualize_loss = True
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True, visualize_loss=visualize_loss)
+                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True, visualize_loss=visualize_loss, do_ba = False)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
                 # Backprop
                 loss.backward()
+
                 with torch.no_grad():
                     # Prune Gaussians
+                    pcNum1 = pcNum2 = pcNum3 = None
                     if config['mapping']['prune_gaussians']:
+                        pcNum1 = int(params['means3D'].shape[0])
+                        #visualize_param_info(params)
                         params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                        pcNum2 = int(params['means3D'].shape[0])
+                        #visualize_param_info(params)
                         if config['use_wandb']:
                             wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
                     # Gaussian-Splatting's Gradient-based Densification
                     if config['mapping']['use_gaussian_splatting_densification']:
                         params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
+                        pcNum3 = int(params['means3D'].shape[0])
+                        #visualize_param_info(params)
                         if config['use_wandb']:
                             wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
+                    #print(f"/////////////PRUNE AND DENSIFY POINTCLOUD is DONE. origial numbers of points: {pcNum1}, pruned pcl: {pcNum2}, densiftied pcl: {pcNum3} " )
                     # Optimizer Update
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
+
                     # Report Progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
@@ -1063,6 +1197,11 @@ def rgbd_slam(config: dict):
                 iter_end_time = time.time()
                 mapping_iter_time_sum += iter_end_time - iter_start_time
                 mapping_iter_time_count += 1
+
+            # open3d vis pointcloud
+            #if time_idx % 5 == 0:
+            #     visualize_param_info(params)
+
             if num_iters_mapping > 0:
                 progress_bar.close()
             # Update the runtime numbers

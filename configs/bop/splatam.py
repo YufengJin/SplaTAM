@@ -6,14 +6,15 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 primary_device="cuda:0"
 seed = 0
 scene_name = scenes[0]
+#scene_name = '000000'
 
-target_object_id = 1
+target_object_id = 1                 # 101  milk, 5 mustard bottle
 
 map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
-tracking_iters = 40
-mapping_iters = 60 
+tracking_iters = 30
+mapping_iters = 10 
 
 group_name = "bop"
 run_name = f"{scene_name}_{seed}"
@@ -46,7 +47,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="/home/datasets/BOP/ycbv/test",
+        basedir="/home/datasets/BOP/ycbv/test",#"/home/datasets/BOP/ycbv/own_syn_data/data1",                #"/home/datasets/BOP/milk",       #"/home/datasets/BOP/ycbv/test",
         gradslam_data_cfg="./configs/data/bop.yaml",  #None
         sequence=scene_name,
         target_object_id = target_object_id,
@@ -66,8 +67,9 @@ config = dict(
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=0.5,
+            im=.5,
             depth=1.0,
+            edge=0.1
         ),
         lrs=dict(
             means3D=0.0,
@@ -75,27 +77,28 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.0004,
-            cam_trans=0.002,
+            cam_unnorm_rots=0.0005,
+            cam_trans=0.001,
         ),
     ),
     mapping=dict(
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.5, # For Addition of new Gaussians
+        sil_thres=0.8, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=0.5,
-            depth=1.0,
+            im=1.0,
+            depth=0.,
+            edge=1.0
         ),
         lrs=dict(
             means3D=0.0001,
-            rgb_colors=0.0025,
-            unnorm_rotations=0.001,
-            logit_opacities=0.05,
-            log_scales=0.001,
+            rgb_colors=0.00025,
+            unnorm_rotations=0.005,
+            logit_opacities=0.003,
+            log_scales=0.005,
             cam_unnorm_rots=0.0000,
             cam_trans=0.0000,
         ),

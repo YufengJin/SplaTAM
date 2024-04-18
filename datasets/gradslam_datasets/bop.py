@@ -66,7 +66,7 @@ class BOPDataset(GradSLAMDataset):
         self.cx = K[0][2] 
         self.cy = K[1][2] 
         depth_scale = np.asarray(cameraInfo[keys[0]]['depth_scale'],np.float64)
-        self.png_depth_scale = 1./depth_scale*1000.
+        self.png_depth_scale = 1./ depth_scale * 1000.
 
     def get_filepaths(self):
         color_paths = []
@@ -107,7 +107,7 @@ class BOPDataset(GradSLAMDataset):
                     c2w[:3, 3] = t
                     c2w = np.linalg.inv(c2w)
                     #c2w[:3, 1:3] = -c2w[:3,1:3]
-                    c2w[:3, 3] /= 1000.
+                    c2w[:3, 3] /= 1000. 
                     c2w = torch.from_numpy(c2w).float()
                     poses.append(c2w)
 
