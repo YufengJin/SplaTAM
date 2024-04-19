@@ -40,7 +40,7 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
-VIS_LOSS_IMAGE = False 
+VIS_LOSS_IMAGE = True 
 
 def visualize_param_info(params):
 
@@ -397,13 +397,10 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     mask = curr_data['mask'].bool()
     gt_im = curr_data['im'] * mask
     
-    eroded_mask = erosion(mask.squeeze())
-    mask = eroded_mask.unsqueeze(0) & nan_mask
-    mask = mask & presence_sil_mask.unsqueeze(0)
+    #eroded_mask = erosion(mask.squeeze())
+    #mask = eroded_mask.unsqueeze(0) & nan_mask
     # Mask with presence silhouette mask (accounts for empty space)
-    #if tracking and use_sil_for_loss:
-    #    mask = mask & presence_sil_mask
-    
+    mask = mask & presence_sil_mask.unsqueeze(0) & nan_mask
 
     # canny edge detection
     gt_gray = ki.color.rgb_to_grayscale(curr_data['im'].unsqueeze(0))
@@ -426,12 +423,11 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     #imshow(1. - edge.clamp(0., 1.))
     
     mask = mask.detach()
-    if True:
-        #losses['edge'] = torch.abs(gt_edge - edge)[mask.unsqueeze(0)].sum()
-        if tracking:
-            losses['edge'] = torch.abs(gt_edge - edge).sum()
-        else:
-            losses['edge'] = torch.abs(gt_edge - edge).mean()
+    #losses['edge'] = torch.abs(gt_edge - edge)[mask.unsqueeze(0)].sum()
+    if tracking:
+        losses['edge'] = torch.abs(gt_edge - edge).sum()
+    else:
+        losses['edge'] = torch.abs(gt_edge - edge).mean()
 
     # Depth loss
     if use_l1:
@@ -451,6 +447,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
     """
+    losses['silhouette'] = torch.abs(silhouette.float() - curr_data['mask']).sum()
 
     color_mask = torch.tile(mask, (3, 1, 1))
     color_mask = color_mask.detach()
@@ -487,6 +484,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         diff_depth = torch.abs(weighted_render_depth - weighted_depth).mean(dim=0).detach().cpu()
         viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
         diff_candy = torch.abs(weighted_render_candy - weighted_candy).mean(dim=0).detach().cpu()
+        diff_sil = torch.abs(presence_sil_mask.float() - curr_data['mask']).squeeze(0).detach().cpu()
         ax[0, 0].imshow(viz_img)
         ax[0, 0].set_title("Weighted GT RGB")
         viz_render_img = torch.clip(weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
@@ -523,6 +521,8 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         ax[3, 1].set_title("Weighted rendered canny")
         ax[3, 2].imshow(torch.clamp(diff_candy.detach().squeeze().cpu(), 0., 1.), cmap="jet")
         ax[3, 2].set_title(f"Diff Edge: {torch.round(losses['edge'])}")
+        ax[3, 3].imshow(torch.clamp(diff_sil, 0., 1.), cmap="jet")
+        ax[3, 3].set_title(f"Silhouette Loss: {float(losses['silhouette'])}")
         # Turn off axis
         for i in range(2):
             for j in range(4):
@@ -910,8 +910,8 @@ def rgbd_slam(config: dict):
     
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
-        if time_idx % 5 != 0:
-            continue
+        #if time_idx % 5 != 0:
+        #    continue
         # Load RGBD frames incrementally instead of all frames
         data = dataset[time_idx]
         mask = None
@@ -952,15 +952,15 @@ def rgbd_slam(config: dict):
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
 
             # use small 6d err as init  pose
-            #with torch.no_grad():
-            #    # Get the ground truth pose relative to frame 0
-            #    rel_w2c = curr_gt_w2c[-1]
-            #    rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
-            #    rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
-            #    rel_w2c_tran = rel_w2c[:3, 3].detach()
-            #    # Update the camera parameters
-            #    params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
-            #    params['cam_trans'][..., time_idx] = rel_w2c_tran
+            with torch.no_grad():
+                # Get the ground truth pose relative to frame 0
+                rel_w2c = curr_gt_w2c[-1]
+                rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
+                rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
+                rel_w2c_tran = rel_w2c[:3, 3].detach()
+                # Update the camera parameters
+                params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
+                params['cam_trans'][..., time_idx] = rel_w2c_tran
             
         # tracking
         tracking_start_time = time.time()
@@ -1177,7 +1177,7 @@ def rgbd_slam(config: dict):
                         if config['use_wandb']:
                             wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
-                    #print(f"/////////////PRUNE AND DENSIFY POINTCLOUD is DONE. origial numbers of points: {pcNum1}, pruned pcl: {pcNum2}, densiftied pcl: {pcNum3} " )
+                    print(f"/////////////PRUNE AND DENSIFY POINTCLOUD is DONE. origial numbers of points: {pcNum1}, pruned pcl: {pcNum2}, densiftied pcl: {pcNum3} " )
                     # Optimizer Update
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)

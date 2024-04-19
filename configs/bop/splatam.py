@@ -5,16 +5,16 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 
 primary_device="cuda:0"
 seed = 0
-scene_name = scenes[0]
-#scene_name = '000000'
+#scene_name = scenes[0]
+scene_name = '000000'
 
-target_object_id = 1                 # 101  milk, 5 mustard bottle
+target_object_id = 101              # 101  milk, 5 mustard bottle
 
 map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
 tracking_iters = 30
-mapping_iters = 10 
+mapping_iters = 80 
 
 group_name = "bop"
 run_name = f"{scene_name}_{seed}"
@@ -47,7 +47,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="/home/datasets/BOP/ycbv/test",#"/home/datasets/BOP/ycbv/own_syn_data/data1",                #"/home/datasets/BOP/milk",       #"/home/datasets/BOP/ycbv/test",
+        basedir="/home/datasets/BOP/milk", #"/home/datasets/BOP/ycbv/own_syn_data/data1",#/home/datasets/BOP/milk",       #"/home/datasets/BOP/ycbv/test",
         gradslam_data_cfg="./configs/data/bop.yaml",  #None
         sequence=scene_name,
         target_object_id = target_object_id,
@@ -67,9 +67,10 @@ config = dict(
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=.5,
+            im=1.,
             depth=1.0,
-            edge=0.1
+            edge=1.,
+            silhouette=0.
         ),
         lrs=dict(
             means3D=0.0,
@@ -89,16 +90,17 @@ config = dict(
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=1.0,
-            depth=0.,
-            edge=1.0
+            im=1.,
+            depth=1.,
+            edge=1.,
+            silhouette=1.
         ),
         lrs=dict(
             means3D=0.0001,
-            rgb_colors=0.00025,
-            unnorm_rotations=0.005,
-            logit_opacities=0.003,
-            log_scales=0.005,
+            rgb_colors=0.0025,
+            unnorm_rotations=0.001,
+            logit_opacities=0.05,
+            log_scales=0.001,
             cam_unnorm_rots=0.0000,
             cam_trans=0.0000,
         ),
@@ -108,8 +110,8 @@ config = dict(
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.005,
+            removal_opacity_threshold=0.5,
+            final_removal_opacity_threshold=0.5,
             reset_opacities=False,
             reset_opacities_every=500, # Doesn't consider iter 0
         ),
@@ -121,8 +123,8 @@ config = dict(
             densify_every=100,
             grad_thresh=0.0002,
             num_to_split_into=2,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.005,
+            removal_opacity_threshold=0.5,
+            final_removal_opacity_threshold=0.01,
             reset_opacities_every=3000, # Doesn't consider iter 0
         ),
     ),
