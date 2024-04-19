@@ -1,11 +1,13 @@
 import os
 from os.path import join as p_join
 
+scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", "000055", "000056", "000057", "000058", "000059"]
+
 primary_device="cuda:0"
 seed = 0
-scene_name = '000000'
+scene_name = scenes[2]
 
-target_object_id = 5    
+target_object_id = 5              # 101  milk, 5 mustard bottle
 
 map_every = 5 
 keyframe_every = 5
@@ -44,7 +46,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="/home/datasets/BOP/ycbv/own_syn_data/data1",
+        basedir="/home/datasets/BOP/ycbv/test", 
         gradslam_data_cfg="./configs/data/bop.yaml",  #None
         sequence=scene_name,
         target_object_id = target_object_id,

@@ -5,7 +5,7 @@ primary_device="cuda:0"
 seed = 0
 scene_name = '000000'
 
-target_object_id = 5    
+target_object_id = 101              # 101  milk, 5 mustard bottle
 
 map_every = 5 
 keyframe_every = 5
@@ -44,7 +44,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="/home/datasets/BOP/ycbv/own_syn_data/data1",
+        basedir="/home/datasets/BOP/milk", 
         gradslam_data_cfg="./configs/data/bop.yaml",  #None
         sequence=scene_name,
         target_object_id = target_object_id,

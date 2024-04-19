@@ -172,7 +172,13 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         if "crop_edge" in config_dict["camera_params"].keys():
             self.crop_edge = config_dict["camera_params"]["crop_edge"]
 
-        self.poses = self.load_poses()
+        if self.name in ['bop']:
+            try:
+                self.poses = self.load_poses()
+                posesNotFound = False
+            except FileNotFoundError as e:
+                raise e("ERROR: scene_gt.json not exists")
+
         paths = self.get_filepaths()
         if len(paths) == 3:
             self.color_paths, self.depth_paths, self.embedding_paths = paths
@@ -190,6 +196,21 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         
         self.num_imgs = len(self.color_paths)
 
+        if not self.name in ['bop']:
+            try:
+                self.poses = self.load_poses()
+                posesNotFound = False
+            except FileNotFoundError as e:
+                posesNotFound = True
+
+        if posesNotFound:
+            poses = []
+            for i in range(self.num_imgs):
+                c2w = np.eye(4) 
+                c2w = torch.from_numpy(c2w).float()
+                poses.append(c2w)
+            self.poses = poses
+        
         if self.end == -1:
             self.end = self.num_imgs
 

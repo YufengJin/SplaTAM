@@ -1319,6 +1319,7 @@ if __name__ == "__main__":
         os.path.basename(args.experiment), args.experiment
     ).load_module()
 
+    breakpoint()
     # Set Experiment Seed
     seed_everything(seed=experiment.config['seed'])
     

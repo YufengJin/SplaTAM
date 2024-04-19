@@ -66,6 +66,8 @@ config = dict(
         loss_weights=dict(
             im=0.5,
             depth=1.0,
+            edge=1.,
+            silhouette=0.
         ),
         lrs=dict(
             means3D=0.0,
@@ -73,8 +75,8 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.0004,
-            cam_trans=0.002,
+            cam_unnorm_rots=0.0005,
+            cam_trans=0.001,
         ),
     ),
     mapping=dict(
@@ -85,8 +87,10 @@ config = dict(
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=0.5,
-            depth=1.0,
+            im=1.,
+            depth=1.,
+            edge=1.,
+            silhouette=1.
         ),
         lrs=dict(
             means3D=0.0001,
@@ -103,8 +107,8 @@ config = dict(
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.005,
+            removal_opacity_threshold=0.5,
+            final_removal_opacity_threshold=0.5,
             reset_opacities=False,
             reset_opacities_every=500, # Doesn't consider iter 0
         ),
@@ -116,8 +120,8 @@ config = dict(
             densify_every=100,
             grad_thresh=0.0002,
             num_to_split_into=2,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.005,
+            removal_opacity_threshold=0.5,
+            final_removal_opacity_threshold=0.01,
             reset_opacities_every=3000, # Doesn't consider iter 0
         ),
     ),
