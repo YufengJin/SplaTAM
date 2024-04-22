@@ -109,8 +109,8 @@ config = dict(
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
-            removal_opacity_threshold=0.5,
-            final_removal_opacity_threshold=0.5,
+            removal_opacity_threshold=0.1,
+            final_removal_opacity_threshold=0.1,
             reset_opacities=False,
             reset_opacities_every=500, # Doesn't consider iter 0
         ),
